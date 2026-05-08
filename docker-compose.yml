@@ -22,8 +22,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL:  "30"
     # DÜZELTME: Port'lar servis komutlarıyla eşleştirildi, trailing slash kaldırıldı
     AIRFLOW_CONN_BRONZE_SERVICE: http://bronze-service:8000
-    AIRFLOW_CONN_SILVER_SERVICE: http://silver-service:8001
-    AIRFLOW_CONN_GOLD_SERVICE:   http://gold-service:8002
+    AIRFLOW_CONN_SILVER_SERVICE: http://silver-service:8000
+    AIRFLOW_CONN_GOLD_SERVICE:   http://gold-service:8000
   volumes:
     - ./deployments/airflow/dags:/opt/airflow/dags:ro
     - airflow-logs:/opt/airflow/logs

@@ -1,0 +1,19 @@
+# --- Core Frameworks ---
+fastapi==0.109.0
+uvicorn==0.27.0
+pydantic==2.6.0
+pyyaml==6.0.1
+
+# --- Data Processing (Spark & Delta) ---
+pyspark==3.5.0
+delta-spark==3.1.0
+
+# --- Messaging & Streaming ---
+aiokafka==0.11.0
+confluent-kafka==2.3.0
+
+# --- Utilities & Testing ---
+faker==22.6.0
+requests==2.31.0
+
+# NOT: pathlib standart kütüphane olduğu için buraya eklenmedi.

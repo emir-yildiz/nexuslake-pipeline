@@ -1,0 +1,254 @@
+version: "3.9"
+
+volumes:
+  storage:
+  airflow-db:
+  airflow-logs:
+
+networks:
+  default:
+    name: nexuslake_default
+
+# ── SHARED CONFIGURATIONS ─────────────────────────────────────────────────────
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.2
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR:                    LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:        postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+    AIRFLOW__CORE__FERNET_KEY:                  ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__CORE__LOAD_EXAMPLES:               "false"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG:          "true"
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL:  "30"
+    # DÜZELTME: Port'lar servis komutlarıyla eşleştirildi, trailing slash kaldırıldı
+    AIRFLOW_CONN_BRONZE_SERVICE: http://bronze-service:8000
+    AIRFLOW_CONN_SILVER_SERVICE: http://silver-service:8001
+    AIRFLOW_CONN_GOLD_SERVICE:   http://gold-service:8002
+  volumes:
+    - ./deployments/airflow/dags:/opt/airflow/dags:ro
+    - airflow-logs:/opt/airflow/logs
+    # DÜZELTME: Airflow storage mount'u layer servisleriyle aynı host path
+    - ./storage:/opt/airflow/storage
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+  restart: unless-stopped
+
+x-base-build: &base-build
+  context: .
+  dockerfile: deployments/docker/base.Dockerfile
+
+x-layer-env: &layer-env
+  PYTHONPATH:        /app
+  KAFKA_CONFIG_PATH: /app/config/kafka_config.yaml
+  SPARK_CONFIG_PATH: /app/config/spark_config.yaml
+  BRONZE_CHECKPOINT: /app/storage/checkpoints/bronze_events
+  SILVER_CHECKPOINT: /app/storage/checkpoints/silver_events
+  GOLD_CHECKPOINT:   /app/storage/checkpoints/gold_metrics
+  BRONZE_OUTPUT:     /app/storage/lakehouse/bronze/events
+  # DÜZELTME: BRONZE_DLQ eksikti — bronze_layer.py bu env'i okur
+  BRONZE_DLQ:        /app/storage/lakehouse/bronze/dead_letter
+  SILVER_OUTPUT:     /app/storage/lakehouse/silver/events
+  GOLD_OUTPUT:       /app/storage/lakehouse/gold/platform_metrics
+
+# ── SERVICES ──────────────────────────────────────────────────────────────────
+
+services:
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  event-producer:
+    build: *base-build
+    image: nexuslake-base:latest
+    container_name: event-producer
+    # DÜZELTME: Port 8000 — diğer servislerden farklı
+    command: uvicorn src.ingestion.producer:app --host 0.0.0.0 --port 8000
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app:ro
+      - ./storage:/app/storage
+    environment:
+      <<: *layer-env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  bronze-service:
+    build: *base-build
+    image: nexuslake-base:latest
+    container_name: bronze-service
+    # DÜZELTME: Port 8000 → 8001'den 8000'e çekti (Airflow conn ile eşleşti)
+    command: uvicorn src.bronze.bronze_service:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 600
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8001:8000"   # host:container — dışarıdan 8001, içeride 8000
+    volumes:
+      - .:/app:ro
+      - ./storage:/app/storage
+    environment:
+      <<: *layer-env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 60s   # Spark JVM başlatma süresi
+
+  silver-service:
+    build: *base-build
+    image: nexuslake-base:latest
+    container_name: silver-service
+    command: uvicorn src.silver.silver_service:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 600
+    # DÜZELTME: Bronze Delta tablosu hazır olmadan Silver başlamamalı
+    depends_on:
+      bronze-service:
+        condition: service_healthy
+    ports:
+      - "8002:8000"
+    volumes:
+      - .:/app:ro
+      - ./storage:/app/storage
+    environment:
+      <<: *layer-env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  gold-service:
+    build: *base-build
+    image: nexuslake-base:latest
+    container_name: gold-service
+    command: uvicorn src.gold.gold_service:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 600
+    # DÜZELTME: Silver hazır olmadan Gold başlamamalı
+    depends_on:
+      silver-service:
+        condition: service_healthy
+    ports:
+      - "8003:8000"
+    volumes:
+      - .:/app:ro
+      - ./storage:/app/storage
+    environment:
+      <<: *layer-env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── SERVING LAYER ────────────────────────────────────────────────────────────
+  serving-api:
+    build: *base-build
+    image: nexuslake-base:latest
+    container_name: serving-api
+    command: uvicorn src.serving.app:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 120
+    # Gold Delta tablosu yazılmaya başlamadan serving okuyamaz
+    depends_on:
+      gold-service:
+        condition: service_healthy
+    ports:
+      - "8004:8000"   # Dashboard/analist erişimi için ayrı port
+    volumes:
+      - .:/app:ro
+      - ./storage:/app/storage    # Gold Delta tablosunu okumak için
+    environment:
+      <<: *layer-env
+      # Serving layer sadece okuma yapar — checkpoint gereksiz
+      GOLD_PATH: /app/storage/lakehouse/gold/platform_metrics
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s   # Spark session + Delta log okuma süresi
+
+  # ── AIRFLOW ──────────────────────────────────────────────────────────────────
+
+  airflow-db:
+    image: postgres:15-alpine
+    container_name: airflow-db
+    environment:
+      POSTGRES_USER:     airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB:       airflow
+    volumes:
+      - airflow-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command: >
+      bash -c "airflow db upgrade &&
+      airflow users create --username admin --password admin
+      --firstname Admin --lastname User --role Admin
+      --email admin@nexuslake.local"
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully

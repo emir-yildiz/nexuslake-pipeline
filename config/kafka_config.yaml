@@ -1,0 +1,10 @@
+kafka:
+  bootstrap_servers: "kafka:29092"
+  topics:
+    raw_events: "raw_ecommerce_events"
+  producer:
+    acks: "all"
+    # retries aiokafka tarafından desteklenmez, exponential backoff run_producer'da yönetilir
+  consumer:
+    group_id: "nexuslake_group"
+    auto_offset_reset: "earliest"

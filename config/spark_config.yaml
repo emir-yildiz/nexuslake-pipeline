@@ -1,0 +1,16 @@
+spark:
+  app_name: "NexusLake_Processor"
+  master: "local[*]" # Prod ortamında 'spark://spark-master:7077' olarak değiştirilir
+  config:
+    # Delta Lake Ayarları
+    spark.sql.extensions: "io.delta.sql.DeltaSparkSessionExtension"
+    spark.sql.catalog.spark_catalog: "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+    spark.databricks.delta.retentionDurationCheck.enabled: "false"
+
+    # Performans Ayarları
+    spark.sql.shuffle.partitions: "4" # Lokal çalışma için düşük tutulmuştur
+    spark.driver.memory: "2g"
+    spark.executor.memory: "2g"
+
+    # Streaming Ayarları
+    spark.sql.streaming.forceDeleteTempCheckpointLocation: "true"

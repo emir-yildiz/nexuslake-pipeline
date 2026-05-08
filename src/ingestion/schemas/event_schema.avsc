@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "EcommerceEvent",
+  "namespace": "com.nexuslake.events",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "user_id", "type": "int"},
+    {"name": "product_id", "type": "int"},
+    {"name": "event_type", "type": "string"},
+    {"name": "price", "type": "double"},
+    {"name": "timestamp", "type": "string"},
+    {"name": "platform", "type": "string"},
+    {"name": "session_id", "type": "string"}
+  ]
+}
